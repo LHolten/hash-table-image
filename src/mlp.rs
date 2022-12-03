@@ -4,7 +4,7 @@ use dfdx::{
 };
 use rand::distributions::Uniform;
 
-pub type Mlp<const L: usize> = (ReLU, Linear<64, 64>, ReLU, Linear<64, 3>, Sigmoid);
+pub type Mlp<const L: usize> = (ReLU, Linear<32, 32>, ReLU, Linear<32, 3>, Sigmoid);
 
 #[derive(Clone)]
 pub struct ConcatLinear<const L: usize, const O: usize> {
