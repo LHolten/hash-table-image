@@ -1,5 +1,6 @@
 #![feature(array_zip)]
 #![feature(iter_array_chunks)]
+#![feature(array_chunks)]
 #![feature(generic_const_exprs)]
 #![feature(new_uninit)]
 
@@ -86,37 +87,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     loop {
+        let mut img = Vec::with_capacity(256 * 256);
         let loss = coords
-            .chunks_exact(256)
-            .zip(pixels.chunks_exact(256))
+            .array_chunks::<{ 256 * 64 }>()
+            .zip(pixels.array_chunks())
             .map(|(coords, pixels)| {
-                let pixels: &[_; 256] = pixels.try_into().unwrap();
                 let pixels = TensorCreator::new(*pixels);
-                let coords: &[_; 256] = coords.try_into().unwrap();
                 let output = table.forward(coords);
+                img.extend(output.data().iter().flatten().map(|v| (v * 255.) as u8));
                 mse_loss(output, pixels)
             })
             .fold(Tensor0D::new(0.).with_diff_tape(), |a, b| b + a);
-        println!("loss = {}", loss.data());
-        let grad = backward(div_scalar(loss, 256.));
+        let loss = div_scalar(loss, 4.);
+        println!("loss = {}", loss.data() * 256.);
+        let grad = backward(loss);
 
         opt.update(&mut table, grad).expect("some unused gradients");
 
-        let output = coords
-            .chunks_exact(256)
-            .flat_map(|coords| {
-                let coords: &[_; 256] = coords.try_into().unwrap();
-                let output = table.forward::<256, NoneTape>(coords);
-                output
-                    .data()
-                    .iter()
-                    .flatten()
-                    .map(|v| (v * 255.) as u8)
-                    .collect::<Vec<u8>>()
-            })
-            .collect::<Vec<u8>>();
-
-        let image = ImageView::new(ImageInfo::rgb8(256, 256), &output);
+        let image = ImageView::new(ImageInfo::rgb8(256, 256), &img);
         window.set_image("output", image)?;
     }
 }
