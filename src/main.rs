@@ -1,5 +1,7 @@
 #![feature(array_zip)]
 #![feature(iter_array_chunks)]
+#![feature(generic_const_exprs)]
+#![feature(new_uninit)]
 
 use std::{fs::File, io::BufReader};
 
@@ -13,7 +15,6 @@ use crate::hashtable::HashTable;
 
 mod box_slice;
 mod hashtable;
-mod mlp;
 
 // pub fn render_layer<const L: usize, const T: usize>(
 //     table: HashTable<L, T>,

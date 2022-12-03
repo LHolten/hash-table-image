@@ -1,23 +1,34 @@
+use std::iter::zip;
+
 use dfdx::{
     gradients::{CanUpdateWithGradients, Tape},
     prelude::*,
 };
 use rand::distributions::Uniform;
 
-use crate::{
-    box_slice::map_boxed,
-    mlp::{ConcatLinear, Mlp},
-};
+use crate::box_slice::map_boxed2;
 
-pub struct HashTable<const L: usize, const T: usize> {
+pub struct HashTable<const L: usize, const T: usize>
+where
+    [(); L * 2]:,
+{
     max_res: usize,
     min_res: usize,
-    layers: [Tensor2D<T, 2>; L],
-    concat_linear: ConcatLinear<L, 32>,
-    mlp: Mlp<L>,
+    layers: Tensor3D<L, T, 2>,
+    mlp: (
+        Linear<{ L * 2 }, 32>,
+        ReLU,
+        Linear<32, 32>,
+        ReLU,
+        Linear<32, 3>,
+        Sigmoid,
+    ),
 }
 
-impl<const L: usize, const T: usize> HashTable<L, T> {
+impl<const L: usize, const T: usize> HashTable<L, T>
+where
+    [(); L * 2]:,
+{
     fn coord_to_index(&self, res: usize, coord: [usize; 2]) -> usize {
         const PRIME: usize = 2_654_435_761;
         debug_assert!(coord[0] <= res, "{} out of bound {res}", coord[0]);
@@ -31,33 +42,48 @@ impl<const L: usize, const T: usize> HashTable<L, T> {
 
     const CORNERS: [[usize; 2]; 4] = [[0, 0], [0, 1], [1, 1], [1, 0]];
 
-    pub fn get<const B: usize, H: Tape>(
-        &self,
-        coords: &[[usize; 2]; B],
-        layer: usize,
-    ) -> Tensor2D<B, 2, H> {
-        let res = self.grid_sizes()[layer];
-        let factor = res as f32 / self.max_res as f32;
-        let scaled_coords = map_boxed(coords, |&[x, y]| [x as f32 * factor, y as f32 * factor]);
+    pub fn get<const B: usize, H: Tape>(&self, coords: &[[usize; 2]; B]) -> Tensor3D<L, B, 2, H> {
+        let all_res = self.grid_sizes();
 
-        let indices = map_boxed(&*scaled_coords, |&[x, y]| {
-            let [x, y] = [x.floor() as usize, y.floor() as usize];
-            Self::CORNERS.map(|up| self.coord_to_index(res, [x + up[0], y + up[1]]))
+        let scaled_coords: Box<[[[f32; 2]; B]; L]> = map_boxed2(
+            all_res,
+            |_| coords,
+            |res, &[x, y]| {
+                let factor = res as f32 / self.max_res as f32;
+                [x as f32 * factor, y as f32 * factor]
+            },
+        );
+
+        let weighted: [Tensor3D<L, B, 2, H>; 4] = Self::CORNERS.map(|up| {
+            let indices = map_boxed2(
+                zip(all_res, &*scaled_coords),
+                |(_, s)| s,
+                |(res, _), &[x, y]| {
+                    let [x, y] = [x.floor() as usize, y.floor() as usize];
+                    self.coord_to_index(res, [x + up[0], y + up[1]])
+                },
+            );
+
+            let weights = map_boxed2(
+                &*scaled_coords,
+                |s| s,
+                |_, &[x, y]| {
+                    let [x, y] = [x.fract(), y.fract()];
+                    let x_w = [1. - x, x];
+                    let y_w = [1. - y, y];
+                    x_w[up[0]] * y_w[up[1]]
+                },
+            );
+
+            let weights: Tensor2D<L, B> = TensorCreator::new_boxed(weights);
+            let weights: Tensor3D<L, B, 2> = weights.broadcast();
+
+            let selected = self.layers.with_diff_tape().select(&*indices);
+            mul(selected, weights)
         });
 
-        let weights = map_boxed(&*scaled_coords, |&[x, y]| {
-            let [x, y] = [x.fract(), y.fract()];
-            let x_w = [1. - x, x];
-            let y_w = [1. - y, y];
-            Self::CORNERS.map(|up| x_w[up[0]] * y_w[up[1]])
-        });
-
-        let weights: Tensor2D<B, 4> = TensorCreator::new_boxed(weights);
-        let weights: Tensor3D<B, 4, 2> = weights.broadcast();
-
-        let layer = self.layers[layer].with_diff_tape();
-        let selected: Tensor3D<B, 4, 2, H> = layer.select(&*indices);
-        mul(selected, weights).sum()
+        let [a, b, c, d] = weighted;
+        a + b + c + d
     }
 
     pub fn grid_sizes(&self) -> [usize; L] {
@@ -67,44 +93,56 @@ impl<const L: usize, const T: usize> HashTable<L, T> {
     }
 }
 
-impl<const L: usize, const T: usize> HashTable<L, T> {
-    pub fn forward<const B: usize, H: Tape>(&self, input: &[[usize; 2]; B]) -> Tensor2D<B, 3, H> {
-        let features = std::array::from_fn(|i| self.get(input, i));
-        let concat = self.concat_linear.forward(features);
+impl<const L: usize, const T: usize> HashTable<L, T>
+where
+    [(); L * 2]:,
+{
+    pub fn forward<const B: usize, H: Tape>(&self, input: &[[usize; 2]; B]) -> Tensor2D<B, 3, H>
+    where
+        Tensor3D<B, L, 2, H>: Reshape<Tensor2D<B, { L * 2 }, H>>,
+    {
+        let features = self.get(input);
+        let concat: Tensor3D<B, L, 2, H> = features.permute();
+        let concat: Tensor2D<B, { L * 2 }, H> = concat.reshape();
         self.mlp.forward(concat)
     }
 }
 
-impl<const L: usize, const T: usize> ResetParams for HashTable<L, T> {
+impl<const L: usize, const T: usize> ResetParams for HashTable<L, T>
+where
+    [(); L * 2]:,
+{
     fn reset_params<R: rand::Rng>(&mut self, rng: &mut R) {
-        self.concat_linear.reset_params(rng);
         self.mlp.reset_params(rng);
 
         let dist = Uniform::new(-0.0001, 0.0001);
-        self.layers.iter_mut().for_each(|w| w.randomize(rng, &dist));
+        self.layers.randomize(rng, &dist);
     }
 }
 
-impl<const L: usize, const T: usize> CanUpdateWithGradients for HashTable<L, T> {
+impl<const L: usize, const T: usize> CanUpdateWithGradients for HashTable<L, T>
+where
+    [(); L * 2]:,
+{
     fn update<G: dfdx::gradients::GradientProvider>(
         &mut self,
         grads: &mut G,
         unused: &mut dfdx::gradients::UnusedTensors,
     ) {
-        self.concat_linear.update(grads, unused);
         self.mlp.update(grads, unused);
-        self.layers.iter_mut().for_each(|w| w.update(grads, unused));
+        self.layers.update(grads, unused);
     }
 }
 
-impl<const L: usize, const T: usize> Default for HashTable<L, T> {
+impl<const L: usize, const T: usize> Default for HashTable<L, T>
+where
+    [(); L * 2]:,
+{
     fn default() -> Self {
-        let layers = std::array::from_fn(|_| Default::default());
         Self {
             max_res: 256,
             min_res: 4,
-            layers,
-            concat_linear: Default::default(),
+            layers: Default::default(),
             mlp: Default::default(),
         }
     }
