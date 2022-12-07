@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 dfdx = "0.10.0"
-jpeg-decoder = "0.3.0"
+tiff = "0.8.0"
 rand = "0.8.5"
 show-image = {version = "0.13.1", features = ["save"]}
 vecmath = "1.0"

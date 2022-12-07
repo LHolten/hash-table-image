@@ -1,4 +1,7 @@
-use std::iter::zip;
+use std::{
+    iter::zip,
+    ops::{BitAnd, BitXor},
+};
 
 use dfdx::{
     gradients::{CanUpdateWithGradients, Tape},
@@ -15,14 +18,7 @@ where
     max_res: usize,
     min_res: usize,
     layers: Tensor3D<L, T, 2>,
-    mlp: (
-        Linear<{ L * 2 }, 32>,
-        ReLU,
-        Linear<32, 32>,
-        ReLU,
-        Linear<32, 3>,
-        Sigmoid,
-    ),
+    mlp: (Linear<{ L * 2 }, 32>, ReLU, Linear<32, 3>, Sigmoid),
 }
 
 impl<const L: usize, const T: usize> HashTable<L, T>
@@ -30,11 +26,16 @@ where
     [(); L * 2]:,
 {
     fn coord_to_index(&self, res: usize, coord: [usize; 2]) -> usize {
-        const PRIME: usize = 2_654_435_761;
+        const fn folded_multiply(s: u64, by: u64) -> u64 {
+            let result = (s as u128).wrapping_mul(by as u128);
+            ((result & 0xffff_ffff_ffff_ffff) as u64) ^ ((result >> 64) as u64)
+        }
+
         debug_assert!(coord[0] <= res, "{} out of bound {res}", coord[0]);
         debug_assert!(coord[1] <= res, "{} out of bound {res}", coord[1]);
         if res * (res + 2) >= T {
-            (coord[0] ^ coord[1].wrapping_mul(PRIME)) % T
+            let hash = folded_multiply(coord[0] as u64, 0x517cc1b727220a95).bitxor(coord[1] as u64);
+            folded_multiply(hash, 0x517cc1b727220a95).bitand(T as u64 - 1) as usize
         } else {
             coord[0] + coord[1] * (res + 1)
         }
@@ -42,16 +43,13 @@ where
 
     const CORNERS: [[usize; 2]; 4] = [[0, 0], [0, 1], [1, 1], [1, 0]];
 
-    pub fn get<const B: usize, H: Tape>(&self, coords: &[[usize; 2]; B]) -> Tensor3D<L, B, 2, H> {
+    pub fn get<const B: usize, H: Tape>(&self, coords: &[[f32; 2]; B]) -> Tensor3D<L, B, 2, H> {
         let all_res = self.grid_sizes();
 
         let scaled_coords: Box<[[[f32; 2]; B]; L]> = map_boxed2(
             all_res,
             |_| coords,
-            |res, &[x, y]| {
-                let factor = res as f32 / self.max_res as f32;
-                [x as f32 * factor, y as f32 * factor]
-            },
+            |res, &[x, y]| [x * res as f32, y * res as f32],
         );
 
         let weighted: [Tensor3D<L, B, 2, H>; 4] = Self::CORNERS.map(|up| {
@@ -97,7 +95,7 @@ impl<const L: usize, const T: usize> HashTable<L, T>
 where
     [(); L * 2]:,
 {
-    pub fn forward<const B: usize, H: Tape>(&self, input: &[[usize; 2]; B]) -> Tensor2D<B, 3, H>
+    pub fn forward<const B: usize, H: Tape>(&self, input: &[[f32; 2]; B]) -> Tensor2D<B, 3, H>
     where
         Tensor3D<B, L, 2, H>: Reshape<Tensor2D<B, { L * 2 }, H>>,
     {
@@ -141,7 +139,7 @@ where
     fn default() -> Self {
         Self {
             max_res: 256,
-            min_res: 4,
+            min_res: 16,
             layers: Default::default(),
             mlp: Default::default(),
         }
