@@ -19,16 +19,21 @@ use crate::hashtable::HashTable;
 mod box_slice;
 mod hashtable;
 
-pub fn render_layer<const L: usize, const T: usize>(table: HashTable<L, T>) -> [Vec<u8>; L * 2]
+pub fn render_layer<const L: usize, const T: usize>(
+    table: &HashTable<L, T>,
+    res: u32,
+) -> ([Vec<u8>; L * 2], Vec<u8>)
 where
     [Vec<f32>; L * 2]: Default,
+    Tensor3D<256, L, 2>: Reshape<Tensor2D<256, { L * 2 }>>,
 {
-    let coords = (0..512)
-        .flat_map(|y| (0..512).map(move |x| [(x as f32 + 0.5) / 512., (y as f32 + 0.5) / 512.]));
+    let coords = (0..res).flat_map(|y| {
+        (0..res).map(move |x| [(x as f32 + 0.5) / res as f32, (y as f32 + 0.5) / res as f32])
+    });
 
     let mut values: [Vec<f32>; L * 2] = Default::default();
 
-    coords.array_chunks().for_each(|coords| {
+    coords.clone().array_chunks().for_each(|coords| {
         let output: Tensor3D<L, 256, 2> = table.get(&coords);
         let output: Tensor3D<L, 2, 256> = output.permute();
 
@@ -41,26 +46,36 @@ where
 
     for layer in &mut values {
         let total: f32 = layer.iter().sum();
-        let avg = total / (512. * 512.);
+        let avg = total / (res * res) as f32;
         layer.iter_mut().for_each(|v| *v -= avg);
         let total_var: f32 = layer.iter().map(|x| x * x).sum();
-        let stddev = f32::sqrt(total_var / (512. * 512.));
-        layer.iter_mut().for_each(|v| *v /= stddev * 2.)
+        let stddev = f32::sqrt(total_var / (res * res) as f32);
+        layer.iter_mut().for_each(|v| *v /= stddev * 3.)
     }
 
-    values.map(|layer| {
-        layer
-            .into_iter()
-            .map(|v| ((v + 1.) / 2. * 255.) as u8)
-            .collect()
-    })
+    let mut img = Vec::with_capacity((res * res) as usize);
+    coords.array_chunks::<256>().for_each(|coords| {
+        let output: Tensor2D<256, 3> = table.forward(&coords);
+        let output = output.data().iter().flatten();
+        img.extend(output.map(|v| (v * 256. - 0.5) as u8));
+    });
+
+    (
+        values.map(|layer| {
+            layer
+                .into_iter()
+                .map(|v| ((v + 1.) / 2. * 255.) as u8)
+                .collect()
+        }),
+        img,
+    )
 }
 
 #[show_image::main]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_name = std::env::args().nth(1).expect("no file name given");
 
-    let mut table = HashTable::<16, { 1 << 12 }>::default();
+    let mut table = HashTable::<16, { 1 << 14 }>::default();
 
     let mut rng = StdRng::seed_from_u64(0);
     table.reset_params(&mut rng);
@@ -108,7 +123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(coords, pixels)| {
                 let pixels = TensorCreator::new(*pixels);
                 let output = table.forward(coords);
-                img.extend(output.data().iter().flatten().map(|v| (v * 255.) as u8));
+                let output_iter = output.data().iter().flatten();
+                img.extend(output_iter.map(|v| (v * 256. - 0.5) as u8));
                 mse_loss(output, pixels)
             })
             .fold(Tensor0D::new(0.).with_diff_tape(), |a, b| b + a);
@@ -117,9 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if loss.data() * 256. < 0.01 {
             println!("took: {:?}", start.elapsed());
-            let layers = render_layer(table);
 
             let mut index = 32;
+            let mut res = 256;
+            let (mut layers, mut img) = render_layer(&table, res);
             window.add_event_handler(move |mut window, event, _flow| {
                 if let WindowEvent::KeyboardInput(event) = event {
                     if event.input.state == ElementState::Pressed {
@@ -127,12 +144,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             index += 33 - 1;
                         } else if event.input.key_code == Some(VirtualKeyCode::Right) {
                             index += 1;
+                        } else if event.input.key_code == Some(VirtualKeyCode::Up) {
+                            res *= 2;
+                            let (l, i) = render_layer(&table, res);
+                            layers = l;
+                            img = i;
                         }
                         index %= 33;
                         let image = if index == 32 {
-                            ImageView::new(ImageInfo::rgb8(256, 256), &img)
+                            ImageView::new(ImageInfo::rgb8(res, res), &img)
                         } else {
-                            ImageView::new(ImageInfo::mono8(512, 512), &*layers[index])
+                            ImageView::new(ImageInfo::mono8(res, res), &*layers[index])
                         };
                         window.set_image("output", &image);
                     }

@@ -18,7 +18,14 @@ where
     max_res: usize,
     min_res: usize,
     layers: Tensor3D<L, T, 2>,
-    mlp: (Linear<{ L * 2 }, 32>, ReLU, Linear<32, 3>, Sigmoid),
+    mlp: (
+        Linear<{ L * 2 }, 32>,
+        ReLU,
+        Linear<32, 32>,
+        ReLU,
+        Linear<32, 3>,
+        Sigmoid,
+    ),
 }
 
 impl<const L: usize, const T: usize> HashTable<L, T>
