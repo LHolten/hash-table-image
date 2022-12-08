@@ -41,6 +41,7 @@ where
         debug_assert!(coord[0] <= res, "{} out of bound {res}", coord[0]);
         debug_assert!(coord[1] <= res, "{} out of bound {res}", coord[1]);
         if res * (res + 2) >= T {
+            // (coord[0] ^ coord[1] * 2_654_435_761).bitand(T - 1)
             let hash = folded_multiply(coord[0] as u64, 0x517cc1b727220a95).bitxor(coord[1] as u64);
             folded_multiply(hash, 0x517cc1b727220a95).bitand(T as u64 - 1) as usize
         } else {

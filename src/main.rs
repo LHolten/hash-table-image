@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let loss = div_scalar(loss, 16.);
         println!("loss = {}", loss.data() * 256.);
 
-        if loss.data() * 256. < 0.01 {
+        if loss.data() * 256. < 0.05 {
             println!("took: {:?}", start.elapsed());
 
             let mut index = 32;
@@ -146,6 +146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             index += 1;
                         } else if event.input.key_code == Some(VirtualKeyCode::Up) {
                             res *= 2;
+                            let (l, i) = render_layer(&table, res);
+                            layers = l;
+                            img = i;
+                        } else if event.input.key_code == Some(VirtualKeyCode::Down) {
+                            res /= 2;
                             let (l, i) = render_layer(&table, res);
                             layers = l;
                             img = i;
